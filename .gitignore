@@ -1,0 +1,17 @@
+node_modules/
+.env
+.env.*
+!.env.example
+data/
+.toolchain/
+build/
+output/
+__pycache__/
+*.pyc
+*.log
+*.keystore
+*.jks
+*.pem
+*.key
+.DS_Store
+Thumbs.db

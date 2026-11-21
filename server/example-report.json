@@ -1,0 +1,21 @@
+{
+  "title": "Проверка учебного проекта",
+  "findings": [
+    {
+      "title": "Пароль в конфигурации",
+      "severity": "high",
+      "rule": "secret.literal",
+      "file": "src/main/resources/application.yml",
+      "line": 12,
+      "fix": "Перенесите пароль в переменную окружения и замените раскрытый секрет."
+    },
+    {
+      "title": "Отключена защита CSRF",
+      "severity": "medium",
+      "rule": "spring.csrf",
+      "file": "src/main/kotlin/SecurityConfig.kt",
+      "line": 24,
+      "fix": "Проверьте способ аутентификации и включите защиту CSRF для запросов из браузера."
+    }
+  ]
+}

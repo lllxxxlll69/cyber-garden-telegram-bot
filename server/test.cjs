@@ -1,0 +1,144 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { JsonRepository } = require('./store.cjs');
+const { ReportService } = require('./service.cjs');
+const { createServer } = require('./http.cjs');
+const { TelegramBot } = require('./telegram.cjs');
+const { renderPdf } = require('./pdf.cjs');
+const example = require('./example-report.json');
+async function setup(t) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'garden-server-'));
+  const repo = await new JsonRepository(dir).open();
+  t.after(async () => { await repo.close(); await fs.rm(dir, { recursive: true, force: true }); });
+  let now = Date.now();
+  return { repo, dir, service: new ReportService(repo, { now: () => now }), advance: ms => { now += ms; } };
+}
+const password = 'long-test-password-123';
+async function account(service, name = 'alice') {
+  const result = await service.login(name, password, true);
+  return { ...result, auth: await service.authenticate(result.token) };
+}
+test('passwords and session secrets are hashed; sessions survive restart and can be revoked', async t => {
+  const { repo, service, dir } = await setup(t);
+  const a = await account(service);
+  await assert.rejects(service.login('alice', 'wrong-password-123'), { status: 401 });
+  const login = await service.login('alice', password);
+  const stored = await fs.readFile(path.join(dir, 'store.json'), 'utf8');
+  assert.ok(!stored.includes(password)); assert.ok(!stored.includes(a.token));
+  await repo.close(); await repo.open();
+  assert.equal((await service.authenticate(a.token)).userId, a.user.id);
+  await service.revoke(a.auth, login.session.id);
+  await assert.rejects(service.authenticate(login.token), { status: 401 });
+  assert.equal((await service.sessions(a.auth)).length, 1);
+});
+test('expiry, code replay, revoked source session and cross-account isolation', async t => {
+  const { service, advance } = await setup(t);
+  const a = await account(service), b = await account(service, 'bob');
+  const code = await service.createCode(a.auth);
+  await service.link(code.code, 123);
+  await assert.rejects(service.link(code.code, 456), { status: 401 });
+  const tg = await service.telegramSession(123);
+  const report = await service.saveReport(a.auth, example);
+  assert.equal((await service.report(tg, report.id)).id, report.id);
+  await assert.rejects(service.report(b.auth, report.id), { status: 404 });
+  await assert.rejects(service.revoke(b.auth, a.session.id), { status: 404 });
+  assert.deepEqual(await service.reports(b.auth), []);
+  const expiring = await service.createCode(a.auth);
+  advance(5 * 60000);
+  await assert.rejects(service.link(expiring.code, 456), { status: 401 });
+  const revoked = await service.createCode(a.auth);
+  await service.revoke(a.auth, a.session.id);
+  await assert.rejects(service.link(revoked.code, 456), { status: 401 });
+  advance(168 * 3600000);
+  await assert.rejects(service.telegramSession(123), { status: 401 });
+  await assert.rejects(service.authenticate(b.token), { status: 401 });
+});
+test('transaction rollback, concurrent registration and single writer lock', async t => {
+  const { repo, service, dir } = await setup(t);
+  await assert.rejects(new JsonRepository(dir).open());
+  await assert.rejects(repo.transaction(s => { s.offset = 999; throw Error('rollback'); }));
+  assert.equal(await repo.read(s => s.offset), 0);
+  const results = await Promise.allSettled([account(service), account(service)]);
+  assert.equal(results.filter(x => x.status === 'fulfilled').length, 1);
+  assert.equal((await repo.read(s => s.users)).length, 1);
+});
+test('persisted account throttle stops brute force', async t => {
+  const { repo, service } = await setup(t);
+  await account(service);
+  for (let i = 0; i < 10; i++) await assert.rejects(service.login('alice', 'wrong-password-123'), { status: 401 });
+  await repo.close(); await repo.open();
+  await assert.rejects(service.login('alice', password), { status: 429 });
+});
+test('Telegram commands, private chat restriction, durable delivery retry and cancellation', async t => {
+  const { repo, service, advance } = await setup(t);
+  const a = await account(service);
+  const calls = []; let failDocument = false;
+  const bot = new TelegramBot('test', service, { render: async () => Buffer.from('%PDF-TEST'), fetchImpl: async (url, options) => {
+    const method = url.split('/').at(-1); calls.push({ method, body: options.body });
+    if (method === 'sendDocument' && failDocument) throw Error('network');
+    return { ok: true, json: async () => ({ ok: true, result: [] }) };
+  } });
+  const update = (text, type = 'private') => ({ message: { text, chat: { id: 123, type }, from: { id: 123 } } });
+  const code = await service.createCode(a.auth);
+  await bot.handle(update('/login ' + code.code, 'group'));
+  await assert.rejects(service.telegramSession(123));
+  await bot.handle(update('/login ' + code.code));
+  await service.saveReport(a.auth, example);
+  failDocument = true; await bot.deliver();
+  assert.equal(await repo.read(s => s.deliveries[0].state), 'pending');
+  await repo.close(); await repo.open(); advance(60000);
+  failDocument = false; await bot.deliver();
+  assert.equal(await repo.read(s => s.deliveries[0].state), 'sent');
+  const form = calls.find(c => c.method === 'sendDocument').body;
+  assert.equal(form.get('document').type, 'application/pdf');
+  await bot.handle(update('/report')); await bot.handle(update('/reports'));
+  await service.saveReport(a.auth, example);
+  await bot.handle(update('/logout')); await bot.deliver();
+  assert.equal(await repo.read(s => s.deliveries.at(-1).state), 'cancelled');
+  assert.equal(calls.filter(c => c.method === 'sendDocument').length, 3);
+});
+test('HTTP cookies, bearer API, validation, isolation, CSRF and PDF download', async t => {
+  const { service } = await setup(t);
+  const server = createServer(service, { port: 0 });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = (url, options = {}) => fetch(base + url, options);
+  const post = (data, extra = {}) => ({ method: 'POST', headers: { 'Content-Type': 'application/json', ...extra }, body: JSON.stringify(data) });
+  assert.equal((await call('/api/reports')).status, 401);
+  const response = await call('/api/register', post({ login: 'alice', password }));
+  assert.equal(response.status, 200);
+  const cookie = response.headers.get('set-cookie'); assert.match(cookie, /HttpOnly; SameSite=Strict/);
+  const a = await response.json();
+  const auth = { Authorization: 'Bearer ' + a.token };
+  assert.equal((await call('/api/me', { headers: { Cookie: cookie.split(';')[0] } })).status, 200);
+  const integrationResponse = await call('/api/sessions', { method: 'POST', headers: auth });
+  assert.equal(integrationResponse.status, 201);
+  const integration = await integrationResponse.json();
+  assert.equal((await service.authenticate(integration.token)).kind, 'api');
+  assert.equal((await call('/api/telegram/code', post({}, { ...auth, Origin: 'https://evil.example' }))).status, 403);
+  const responseReport = await call('/api/reports', post(example, auth));
+  assert.equal(responseReport.status, 201);
+  const report = await responseReport.json();
+  const pdf = await call(`/api/reports/${report.id}/pdf`, { headers: auth });
+  assert.equal(pdf.headers.get('content-type'), 'application/pdf');
+  const pdfBytes = Buffer.from(await pdf.arrayBuffer());
+  assert.equal(pdfBytes.subarray(0, 5).toString(), '%PDF-');
+  assert.equal((pdfBytes.toString('latin1').match(/\/Type \/Page\b/g) || []).length, 1, 'footer must not add blank pages');
+  const b = await account(service, 'bob');
+  assert.equal((await call(`/api/reports/${report.id}/pdf`, { headers: { Authorization: 'Bearer ' + b.token } })).status, 404);
+  assert.equal((await call('/api/reports', post({ findings: [{ severity: 'bad' }] }, auth))).status, 400);
+  assert.equal((await call('/api/register', post(null))).status, 400);
+  assert.equal((await call('/api/logout', { method: 'POST', headers: auth })).status, 200);
+  assert.equal((await call('/api/me', { headers: auth })).status, 401);
+  assert.equal((await service.authenticate(integration.token)).kind, 'api', 'integration session is independent of browser logout');
+});
+test('PDF supports empty and long multipage Cyrillic reports', async () => {
+  for (const findings of [[], Array.from({ length: 80 }, () => ({ ...example.findings[0], title: 'Проверка кириллицы: небезопасная конфигурация', fix: 'Рекомендация. '.repeat(100) }))]) {
+    const pdf = await renderPdf({ title: 'Тестовый отчёт', id: 'test', created: Date.now(), findings });
+    assert.equal(pdf.subarray(0, 5).toString(), '%PDF-'); assert.ok(pdf.length > 5000);
+  }
+});

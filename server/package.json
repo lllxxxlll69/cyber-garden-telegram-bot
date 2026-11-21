@@ -1,0 +1,12 @@
+{
+  "name": "cyber-garden-report-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local accounts, sessions and Telegram PDF reports",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env index.cjs",
+    "test": "node --test test.cjs workspace.test.cjs"
+  },
+  "dependencies": { "pdfkit": "0.17.2" }
+}
