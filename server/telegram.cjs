@@ -5,6 +5,7 @@ class TelegramBot {
   constructor(token, service, { fetchImpl = fetch, render = renderPdf } = {}) {
     this.token = token; this.service = service; this.fetch = fetchImpl; this.render = render;
     this.stopping = false; this.controller = new AbortController(); this.delivering = false;
+    this.connected = false;
   }
   async call(method, body) {
     const multipart = body instanceof FormData;
@@ -92,21 +93,28 @@ class TelegramBot {
     } finally { this.delivering = false; }
   }
   async run() {
-    await this.call('getMe', {});
-    this.timer = setInterval(() => { this.deliver().catch(() => console.error('Ошибка очереди доставки')); }, 15000);
-    await this.deliver();
     while (!this.stopping) {
       try {
+        if (!this.timer) {
+          await this.call('getMe', {});
+          if (this.stopping) break;
+          this.timer = setInterval(() => { this.deliver().catch(() => console.error('Ошибка очереди доставки')); }, 15000);
+          await this.deliver();
+        }
         const offset = await this.service.repo.read(s => s.offset);
         const updates = await this.call('getUpdates', { offset, timeout: 25, allowed_updates: ['message'] });
+        if (this.stopping) break;
+        this.connected = true;
         for (const update of updates) {
           if (this.stopping) break;
           await this.handle(update);
           await this.service.repo.transaction(s => { s.offset = update.update_id + 1; });
         }
-      } catch {
+      } catch (error) {
+        this.connected = false;
         if (!this.stopping) {
-          console.error('Telegram недоступен; повтор через 5 секунд');
+          const reason = /^Telegram API: \d{3}$/.test(error.message) ? error.message : 'ошибка подключения или обработки';
+          console.error('Telegram: %s. Повтор через 5 секунд.', reason);
           await new Promise(resolve => {
             const done = () => { clearTimeout(timer); this.controller.signal.removeEventListener('abort', done); resolve(); };
             const timer = setTimeout(done, 5000);
@@ -116,6 +124,6 @@ class TelegramBot {
       }
     }
   }
-  stop() { this.stopping = true; clearInterval(this.timer); this.controller.abort(); }
+  stop() { this.stopping = true; this.connected = false; clearInterval(this.timer); this.controller.abort(); }
 }
 module.exports = { TelegramBot };

@@ -4,7 +4,7 @@
 
 ## Запуск на Windows
 
-Из корня `cyber-garden-telegram-bot`:
+Из корня репозитория:
 
 ```powershell
 cd server
@@ -38,7 +38,7 @@ $env:REPORT_WEBHOOK_KEY = '<токен интеграции>'
 node garden/cli.cjs ../cyber-garden-testbed ../cyber-garden-testbed/workflow.json ../cyber-garden-testbed/advisories.json
 ```
 
-Команду CLI запускайте из корня `cyber-garden-telegram-bot`; в сценарии нужен блок notify. Можно загружать JSON полного результата CLI или тело `security.report`: сервер принимает поле `findings`, остальные служебные поля не требуются. Содержимое исходников и значения секретов сервер специально не добавляет в PDF.
+Команду CLI запускайте из корня репозитория; в сценарии нужен блок notify. Можно загружать JSON полного результата CLI или тело `security.report`: сервер принимает поле `findings`, остальные служебные поля не требуются. Содержимое исходников и значения секретов сервер специально не добавляет в PDF.
 
 ## Команды бота
 
@@ -72,7 +72,7 @@ node garden/cli.cjs ../cyber-garden-testbed ../cyber-garden-testbed/workflow.jso
 
 | Метод | Путь | Назначение |
 | --- | --- | --- |
-| GET | `/health` | Проверка сервера, наличие настройки токена (не доступность Telegram) |
+| GET | `/health` | `ok`, `telegramConfigured` (токен настроен), `telegramConnected` (polling Telegram подключён) |
 | POST | `/api/register` | `{ "login": "user", "password": "..." }` |
 | POST | `/api/login` | Та же структура; возвращает токен и устанавливает cookie |
 | GET | `/api/me` | ID текущей и список активных сессий |
@@ -93,7 +93,7 @@ node garden/cli.cjs ../cyber-garden-testbed ../cyber-garden-testbed/workflow.jso
 
 Для нормализованной БД следующая структура: users (unique login), sessions (user_id, token_hash, expires), pairing_codes (unique hash, session_id, expires), reports (user_id), findings (report_id), deliveries (report_id, session_id), bot_state и login_attempts. На больших объёмах замените операции над снимком методами репозитория для каждой сущности и захватом заданий очереди. Текущий JSON-адаптер целиком держит данные в памяти, не предназначен для нескольких серверов и не выполняет автоматическую очистку истории отчётов.
 
-По умолчанию локальный режим слушает loopback. Для Android в общей доверенной Wi-Fi сети поддерживается `HOST=0.0.0.0` с явным `ALLOWED_HOSTS` (IPv4 компьютера); подробности, API рабочего пространства и сборка APK — в [Android-приложение](https://github.com/lllxxxlll69/cyber-garden-mobile). Для удалённого развёртывания отдельно настройте HTTPS, разрешённые Host/Origin, доверенный reverse proxy и Secure cookie; установка `COOKIE_SECURE=true` сама по себе не добавляет HTTPS.
+По умолчанию локальный режим слушает loopback. Для Android в общей доверенной Wi-Fi сети поддерживается `HOST=0.0.0.0` с явным `ALLOWED_HOSTS` (IPv4 компьютера); подробности, API рабочего пространства и сборка APK — в [Android README](https://github.com/lllxxxlll69/cyber-garden-mobile). Для удалённого развёртывания отдельно настройте HTTPS, разрешённые Host/Origin, доверенный reverse proxy и Secure cookie; установка `COOKIE_SECURE=true` сама по себе не добавляет HTTPS.
 
 ## Проверки
 
@@ -102,6 +102,8 @@ cd server
 npm test
 ```
 
-Тесты проверяют сохранение и отзыв сессий, истечение кодов и сессий, одноразовость, изоляцию аккаунтов, throttling, атомарность, HTTP и cookie, команды Telegram и повтор доставки, многостраничные PDF. Анализаторы проверяются из корня: `node --test garden/test.cjs garden/github.test.cjs`.
+Тесты проверяют сохранение и отзыв сессий, истечение кодов и сессий, одноразовость, изоляцию аккаунтов, throttling, атомарность, HTTP и cookie, команды Telegram и повтор доставки, многостраничные PDF. Из корня этого репозитория: `node --test garden/test.cjs garden/github.test.cjs garden/custom.test.cjs`.
+
+Проверки Electron доступны в [основном репозитории](https://github.com/Maxuttta/hackgarden2026): `npm run smoke:reports` и `npm run smoke:mobile`. Они используют временные данные и не отправляют настоящих сообщений.
 
 PDF создаётся [PDFKit](https://pdfkit.org/docs/text.html) со встроенным TTF-шрифтом JetBrains Mono из [официального репозитория](https://github.com/JetBrains/JetBrainsMono/tree/master/fonts/ttf). Лицензия: `assets/fonts/JetBrainsMono-OFL.txt`.

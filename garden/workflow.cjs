@@ -1,5 +1,6 @@
 const {scan,levels}=require('./scanners.cjs');
-const types=['manual','schedule','secrets','sca','sast','condition','ai','notify'];
+const {validateCustom,scanCustom}=require('./custom.cjs');
+const types=['custom','manual','schedule','secrets','sca','sast','condition','ai','notify'];
 function plan(graph){
   if(!graph||!Array.isArray(graph.nodes)||!Array.isArray(graph.edges)||graph.nodes.length>64||graph.edges.length>256) throw Error('Некорректный граф');
   const nodes=new Map(graph.nodes.map(n=>[n.id,n]));
@@ -7,6 +8,7 @@ function plan(graph){
   const starts=graph.nodes.filter(n=>['schedule','manual'].includes(n.type));
   if(starts.length!==1) throw Error('Нужен один стартовый блок');
   for(const n of graph.nodes){
+    if(n.type==='custom')validateCustom(n.definition);
     if(n.level&&!levels.includes(n.level))throw Error('Неизвестная критичность');
     if(n.type==='condition'){
       if(!Number.isInteger(n.count??1)||(n.count??1)<0)throw Error('Проверьте порог числа находок');
@@ -35,6 +37,7 @@ async function execute(graph,files,catalog,services,status=()=>{}){
     status({id:n.id,state:'Выполняется'});
     try{
       if(['secrets','sca','sast'].includes(n.type)) rows=[...rows,...scan(n.type,files,catalog).filter(f=>levels.indexOf(f.severity)>=levels.indexOf(n.level||'info'))];
+      if(n.type==='custom')rows=[...rows,...scanCustom(n.definition,files)];
       if(n.type==='condition'){
         const re=n.pattern?new RegExp(n.pattern,'i'):null;
         const pass=rows.filter(f=>levels.indexOf(f.severity)>=levels.indexOf(n.level||'high')&&(!re||re.test(f.file))).length>=Number(n.count??1);

@@ -22,7 +22,7 @@ npm start
 cd server
 npm test
 cd ..
-node --test garden/test.cjs garden/github.test.cjs
+node --test garden/test.cjs garden/github.test.cjs garden/custom.test.cjs
 ```
 
 ## Структура
@@ -39,3 +39,7 @@ node --test garden/test.cjs garden/github.test.cjs
 
 [Подробная документация, API и настройки](server/README.md).
 Токены, локальные аккаунты, отчёты и каталоги зависимостей в публикацию не входят. Эвристические анализаторы предназначены для учебных проектов; встроенные находки и справочник синтетические.
+
+## Совместимость
+
+Общие модули поддерживают пользовательские блоки сценариев и локальную Qwen 2.5. `/health` сообщает отдельно о настройке токена и состоянии polling Telegram. При временной недоступности Telegram бот повторяет подключение. Для автоотправки PDF включите соответствующую настройку в [настольном приложении](https://github.com/Maxuttta/hackgarden2026).

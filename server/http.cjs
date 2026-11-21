@@ -14,7 +14,7 @@ async function jsonBody(request) {
   try { return JSON.parse(Buffer.concat(chunks).toString()); }
   catch { throw new AppError(400, 'Некорректный JSON'); }
 }
-function createServer(service, { secureCookie = false, host = '127.0.0.1', port = 8787, botEnabled = false, workspace = null, allowedHosts = [] } = {}) {
+function createServer(service, { secureCookie = false, host = '127.0.0.1', port = 8787, botEnabled = false, botConnected = () => false, workspace = null, allowedHosts = [] } = {}) {
   const origins = new Set([`http://${host}:${port}`, `http://localhost:${port}`]);
   const cookie = raw => `garden_session=${raw}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${raw ? Math.floor(service.ttl / 1000) : 0}${secureCookie ? '; Secure' : ''}`;
   // Restrict brute force/registration before invoking password derivation.
@@ -52,7 +52,7 @@ function createServer(service, { secureCookie = false, host = '127.0.0.1', port 
         res.writeHead(200, { 'Content-Type': file.endsWith('.html') ? 'text/html; charset=utf-8' : file.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8' });
         res.end(content); return;
       }
-      if (method === 'GET' && url.pathname === '/health') return send(200, { ok: true, telegramConfigured: botEnabled });
+      if (method === 'GET' && url.pathname === '/health') return send(200, { ok: true, telegramConfigured: botEnabled, telegramConnected: botConnected() });
       if (method === 'POST' && ['/api/register', '/api/login'].includes(url.pathname)) {
         const now = Date.now();
         for (const [key, value] of rates) if (value.until <= now) rates.delete(key);

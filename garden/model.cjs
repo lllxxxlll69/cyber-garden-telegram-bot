@@ -1,7 +1,7 @@
 async function complete(post,cfg,messages){
  if(!cfg.model)throw Error('Выберите модель в настройках подключений');
  const native=new URL(cfg.endpoint).pathname==='/api/chat';
- const options=native?{think:false,format:'json',options:{temperature:0,num_predict:800,num_ctx:4096}}:{temperature:0,max_tokens:1200,response_format:{type:'json_object'}};
+ const options=native?{...(/^qwen2\.5(?::|$)/.test(cfg.model)?{}:{think:false}),format:'json',options:{temperature:0,num_predict:800,num_ctx:4096}}:{temperature:0,max_tokens:1200,response_format:{type:'json_object'}};
  const res=await post(cfg.endpoint,{model:cfg.model,stream:false,messages,...options},cfg.key,180000);
  const reply=await res.json();
  return JSON.parse(native?reply.message.content:reply.choices[0].message.content);

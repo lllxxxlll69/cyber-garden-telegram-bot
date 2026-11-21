@@ -17,7 +17,7 @@ async function main() {
   const workspace=new WorkspaceService(service,{llm:{endpoint:process.env.LLM_ENDPOINT||'http://127.0.0.1:11434/api/chat',model:process.env.LLM_MODEL||'',key:process.env.LLM_KEY||''},timezone:process.env.SCHEDULE_TIMEZONE||'Europe/Moscow'});
   await workspace.recover();
   const bot = process.env.TELEGRAM_BOT_TOKEN ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, service) : null;
-  const server = createServer(service, { host, port, secureCookie: process.env.COOKIE_SECURE === 'true', botEnabled: !!bot,workspace,allowedHosts });
+  const server = createServer(service, { host, port, secureCookie: process.env.COOKIE_SECURE === 'true', botEnabled: !!bot, botConnected: () => bot?.connected === true, workspace, allowedHosts });
   try {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
   } catch (error) { await repo.close(); throw error; }
