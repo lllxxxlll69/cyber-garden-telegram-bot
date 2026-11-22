@@ -1,4 +1,4 @@
-const supported=/\.(?:kts?|properties|ya?ml|env|pem|key)$/i;
+const supported=/\.(?:kts?|gradle|lockfile|toml|properties|ya?ml|env|pem|key)$/i;
 const excluded=new Set(['.git','.gradle','build','out','node_modules','.idea','target']);
 
 function repository(raw){

@@ -1,59 +1,116 @@
-const levels = ['info','low','medium','high','critical'];
+const {scanGradle,validateCatalog,version,levels}=require('./gradle-analysis.cjs');
+const {scanSecrets}=require('./secret-analysis.cjs');
+const {scanSpring}=require('./spring-analysis.cjs');
 const demoCatalog = [{module:'garden.training:demo-codec', introduced:'1.0.0', fixed:'1.2.0', id:'TRAINING-001', severity:'high'}];
 const demoFiles = {
   'build.gradle.kts':'plugins { kotlin("jvm") version "2.0.21"; id("org.springframework.boot") version "3.3.5" }\ndependencies {\n    implementation("garden.training:demo-codec:1.1.0")\n}',
   'src/main/resources/application.yml':'spring:\n  datasource:\n    password: "training-local-only"',
   'src/main/kotlin/SecurityConfig.kt':'package garden.training\n\nfun configure(http: HttpSecurity) {\n    http.authorizeHttpRequests { rules ->\n        rules.anyRequest().permitAll()\n    }\n}'
 };
-function versionCompare(a,b) {
-  const parse = v => v.split('.').map(Number);
-  const left=parse(a), right=parse(b);
-  for(let i=0;i<Math.max(left.length,right.length);i++) {
-    const delta=(left[i]||0)-(right[i]||0);
-    if(delta) return delta;
+// Keep strings for the rules and replace comments without changing line numbers.
+function withoutCodeComments(source) {
+  return source.replace(/"""[\s\S]*?(?:"""|$)|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|\/\/[^\r\n]*|\/\*[\s\S]*?(?:\*\/|$)/g, token =>
+    token.startsWith('/') ? token.replace(/[^\r\n]/g, ' ') : token);
+}
+const kotlinReviewRules=[
+  {pattern:/\b(?:Runtime\s*\.\s*getRuntime\s*\(\s*\)\s*\.\s*exec|ProcessBuilder)\s*\(/,id:'process.command',severity:'medium',title:'Запуск внешнего процесса',fix:'Проверьте источник команды и аргументов. Ограничьте список разрешённых команд.'},
+  {pattern:/\.\s*printStackTrace\s*\(/,id:'logging.stacktrace',severity:'low',title:'Прямой вывод трассировки стека',fix:'Проверьте, кто видит журнал. Исключите вывод чувствительных данных.'},
+  {pattern:/\b(?:(?:allowCredentials|setAllowCredentials)\s*\(\s*true\s*\)|allowCredentials\s*=\s*true\b)/,id:'cors.credentials',severity:'low',title:'CORS разрешает передачу credentials',fix:'Проверьте, что разрешены только доверенные источники.'},
+  {pattern:/\bMessageDigest\s*\.\s*getInstance\s*\(\s*"(?:MD5|SHA-?1)"\s*\)/i,id:'crypto.legacy-digest',severity:'medium',title:'Используется устаревшая хеш-функция',fix:'Проверьте назначение хеша. Для задач безопасности используйте современный алгоритм.'},
+  {pattern:/\bNoopHostnameVerifier\s*(?:\.\s*INSTANCE\b|\()/,id:'tls.hostname-verification',severity:'high',title:'Используется проверяющий без валидации имени TLS-сервера',fix:'Используйте стандартную проверку имени хоста и цепочки сертификатов.'},
+  {pattern:/\b(?:setAllowUniversalAccessFromFileURLs\s*\(\s*true\s*\)|allowUniversalAccessFromFileURLs\s*=\s*true\b)/,id:'webview.file-access',severity:'high',title:'WebView разрешает сетевой доступ из локальных файлов',fix:'Отключите универсальный доступ из файлов и ограничьте источники содержимого WebView.'}
+];
+
+function gradleVersionCatalog(source=''){
+  const versions=new Map(), declarations=[];
+  let section='';
+  for(const line of source.split(/\r?\n/)){
+    const header=line.match(/^\s*\[([\w.-]+)\]\s*(?:#.*)?$/);
+    if(header){section=header[1];continue;}
+    const entry=line.match(/^\s*(?:([\w.-]+)|["']([\w.-]+)["'])\s*=\s*(.*?)\s*$/);
+    if(!entry)continue;
+    const [,bare,quoted,value]=entry, name=bare||quoted;
+    const literal=value.match(/^["']([^"']+)["']\s*(?:#.*)?$/)?.[1];
+    if(section==='versions'&&literal&&version.test(literal))versions.set(name,literal);
+    if(section==='libraries')declarations.push({name,value,literal});
   }
-  return 0;
+  const libraries=new Map();
+  for(const {name,value,literal} of declarations){
+    let module, declaredVersion;
+    if(literal){
+      const coordinate=literal.match(/^([\w.-]+:[\w.-]+):([^:]+)$/);
+      if(coordinate)[,module,declaredVersion]=coordinate;
+    }else{
+      const fields=value.match(/^\{([^{}]*)\}\s*(?:#.*)?$/)?.[1];
+      if(fields===undefined)continue;
+      const columns=new Map([...fields.matchAll(/(?:^|,)\s*(module|group|name|version(?:\.ref)?)\s*=\s*["']([^"']*)["']/g)]
+        .map(([,field,text])=>[field,text]));
+      module=columns.get('module');
+      if(!module&&columns.has('group')&&columns.has('name'))module=columns.get('group')+':'+columns.get('name');
+      declaredVersion=columns.has('version.ref')?versions.get(columns.get('version.ref')):columns.get('version');
+    }
+    if(module&&/^[\w.-]+:[\w.-]+$/.test(module)&&version.test(declaredVersion))
+      libraries.set(name.replace(/[-_.]+/g,'.'),{module,version:declaredVersion});
+  }
+  return libraries;
 }
-const version = /^\d+(?:\.\d+){0,3}$/;
-function validateCatalog(rows) {
-  if(!Array.isArray(rows)||rows.length>5000||rows.some(r=>!r||typeof r.module!=='string'||!/^[-.\w]+:[-.\w]+$/.test(r.module)||!version.test(r.introduced)||!version.test(r.fixed)||versionCompare(r.introduced,r.fixed)>=0||typeof r.id!=='string'||!/^[-\w.]{1,80}$/.test(r.id)||!levels.includes(r.severity))) throw Error('Неверный формат справочника. См. пример в README.');
-  return rows;
-}
-function scan(kind,files,catalog=demoCatalog) {
-  const findings=[];
-  const propertyVersions=new Map();
-  for(const [file,source] of Object.entries(files)) if(file.endsWith('gradle.properties')){
-    for(const m of source.matchAll(/^\s*([\w.]+)\s*=\s*([\d.]+)\s*$/gm))propertyVersions.set(m[1],m[2]);
+
+function scan(kind,files,catalog=demoCatalog,diagnose=()=>{}) {
+  if(kind==='secrets')return scanSecrets(files,diagnose);
+  if(kind==='sca')return scanGradle(files,catalog,gradleVersionCatalog(files['gradle/libs.versions.toml']),diagnose);
+  if(kind!=='sast')return [];
+  const findings=scanSpring(files,diagnose);
+  const contextual=new Map();
+  for(const f of findings){
+    if(!contextual.has(f.file))contextual.set(f.file,[]);
+    contextual.get(f.file).push(f);
   }
   for(const [file,source] of Object.entries(files)) {
-    const variables=new Map([...source.matchAll(/\bval\s+(\w+)\s*=\s*"([\d.]+)"/g)].map(m=>[m[1],m[2]]));
-    for(const [name,value] of propertyVersions) if(!variables.has(name)) variables.set(name,value);
-    const lines=source.split(/\r?\n/);
+    const kotlin=/\.kts?$/i.test(file);
+    const config=/\.(?:properties|ya?ml)$/i.test(file);
+    if(!kotlin&&!config)continue;
+    const code=kotlin?withoutCodeComments(source):source;
+    const covered=(kind,line)=>contextual.get(file)?.some(f=>f.class===kind&&f.line<=line&&line<=(f.endLine??f.line));
+    const lines=code.split(/\r?\n/);
     lines.forEach((line,i)=>{
-      const add=(rule,severity,title,fix,reference='')=>findings.push({rule,severity,title,fix,reference,file,line:i+1});
+      const add=(rule,severity,title,fix,reference='')=>findings.push({category:'SAST',class:({'spring.public':'route-authorization','tls.hostname-verification':'tls-verification','sql.parameter':'sql-injection'})[rule]??rule,rule,severity,title,description:title,fix,reference,file,line:i+1});
       if(/^\s*(?:\/\/|\*|#)/.test(line)) return;
-      if(kind==='secrets'){
-        const match=line.match(/(?:[\w.-]*(?:password|passwd|secret|api[_-]?key|token))["']?\s*(?::\s*String\s*)?[:=]\s*(?:["']([^"'\n]+)["']|([^\s#,;}]+))/i);
-        const value=match&&(match[1]||match[2]);
-        if(value && (match[1]||/\.(?:properties|ya?ml|env)$|(?:^|\/)\.env$/.test(file)) && !/^(?:\$|<|\*|null$|changeme$|getenv\b|System\.)/i.test(value)) add('secret.literal','high','Секрет записан в исходниках','Вынесите значение в хранилище секретов и замените выданные учётные данные.');
-        if(/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(line)) add('secret.private-key','critical','Закрытый ключ в проекте','Удалите ключ из проекта и отзовите его.');
-      }
-      if(kind==='sca' && file.endsWith('.gradle.kts')){
-        for(const m of line.matchAll(/["']([\w.-]+:[\w.-]+):([^"']+)["']/g)){
-          const v=m[2].replace(/\$\{?(\w+)\}?/g,(s,k)=>variables.get(k)||s);
-          if(!version.test(v)) continue;
-          for(const r of catalog.filter(r=>r.module===m[1]&&versionCompare(v,r.introduced)>=0&&versionCompare(v,r.fixed)<0))
-            add('sca.range',r.severity,'Зависимость '+r.module+' '+v,'Обновите зависимость до '+r.fixed+' или совместимой исправленной версии.',r.id);
+      if(kind==='sast' && kotlin){
+        if(/\b(?:anyRequest|requestMatchers|csrf)\b/.test(line)){
+          const context=lines.slice(i,i+7).join('\n').slice(0,3500);
+          if(!/\bsecurityMatchers?\s*\(/.test(code)&&!covered('route-authorization',i+1)&&/^[^\n]*?\b(?:anyRequest\s*\(\s*\)|requestMatchers\s*\(\s*"\/\*\*"\s*\))\s*\.\s*permitAll\s*\(/.test(context))
+            add('spring.public','high','Все маршруты разрешены без входа','Ограничьте публичные маршруты явным списком и потребуйте вход для остальных.');
+          if(/^[^\n]*?\bcsrf\s*(?:\(\s*\)\s*\.\s*disable\s*\(|\{[^{}]*?\bdisable\s*\()/.test(context))
+            add('spring.csrf','medium','Отключена защита CSRF','Проверьте способ аутентификации. Для сессий с cookie включите CSRF.');
+        }
+        const query=/\b(?:jdbcTemplate|executeQuery)\b/.test(line)&&lines.slice(i,i+7).join('\n').slice(0,3500)
+          .match(/^[^\n]*?(?:\bjdbcTemplate\s*\.\s*(?:query\w*|update)|\bexecuteQuery)\s*\(\s*"((?:\\.|[^"\\\r\n])*)"\s*(\+)?/i);
+        if(!covered('sql-injection',i+1)&&query&&(query[2]||/(?<!\\)\$(?:\w|\{)/.test(query[1])))
+          add('sql.parameter','high','Данные подставляются в SQL','Передайте значения отдельными параметрами подготовленного запроса.');
+        for(const rule of kotlinReviewRules){
+          if(!rule.pattern.test(line))continue;
+          if(rule.id==='cors.credentials'){
+            if(!/\b(?:addCorsMappings|CorsConfiguration)\b/.test(code))
+              diagnose({category:'SAST',file,line:i+1,code:'spring.cors-context',message:'Credentials разрешены. Связь с origin и приватным маршрутом не установлена.'});
+          }else add(rule.id,rule.severity,rule.title,rule.fix);
         }
       }
-      if(kind==='sast' && file.endsWith('.kt')){
-        const context=lines.slice(Math.max(0,i-2),i+1).join(' ').replace(/\s+/g,' ');
-        if(/permitAll\s*\(/.test(line)&&/(?:anyRequest\s*\(\s*\)|requestMatchers\s*\(\s*"\/\*\*"\s*\))\s*\.\s*permitAll\s*\(/.test(context)) add('spring.public','high','Все маршруты разрешены без входа','Ограничьте публичные маршруты явным списком и потребуйте вход для остальных.');
-        if(/csrf\s*(?:\([^)]*\)\s*\.|\{[^}]*?)disable\s*\(/.test(line)) add('spring.csrf','medium','Отключена защита CSRF','Проверьте способ аутентификации. Для сессий с cookie включите CSRF.');
-        if(/(?:jdbcTemplate\s*\.\s*(?:query\w*|update)|executeQuery)\s*\(\s*"[^"]*(?:\$\w|\$\{|"\s*\+)/i.test(line)) add('sql.parameter','high','Данные подставляются в SQL','Передайте значения отдельными параметрами подготовленного запроса.');
+      if(kind==='sast' && config && /^\s*debug\s*[:=]\s*["']?true["']?\s*(?:#.*)?$/i.test(line)){
+        add('config.debug','low','Включён отладочный режим','Проверьте, что отладочный режим отключён в рабочем окружении.');
       }
     });
   }
   return findings;
 }
-module.exports={scan,levels,demoFiles,demoCatalog,validateCatalog};
+function analyze(kind,files,catalog){
+  const collected=new Map();
+  const findings=scan(kind,files,catalog,d=>collected.set(JSON.stringify([d.file,d.line,d.code,d.message]),d));
+  const extensions={
+    secrets:/\.(?:kts?|properties|ya?ml|env|pem|key)$/i,
+    sast:/\.(?:kts?|properties|ya?ml)$/i,
+    sca:/\.(?:gradle(?:\.kts)?|properties|toml|lockfile)$/i
+  };
+  return {findings,diagnostics:[...collected.values()],
+    coverage:{kind,fileCount:Object.keys(files).filter(f=>extensions[kind]?.test(f)).length}};
+}
+module.exports={scan,analyze,levels,demoFiles,demoCatalog,validateCatalog};

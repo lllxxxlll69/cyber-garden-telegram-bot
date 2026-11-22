@@ -1,4 +1,4 @@
-const {scan,levels}=require('./scanners.cjs');
+const {analyze,levels}=require('./scanners.cjs');
 const {validateCustom,scanCustom}=require('./custom.cjs');
 const types=['custom','manual','schedule','secrets','sca','sast','condition','ai','notify'];
 function plan(graph){
@@ -29,14 +29,20 @@ function plan(graph){
   return order;
 }
 async function execute(graph,files,catalog,services,status=()=>{}){
-  const order=plan(graph), inputs=new Map([[order[0].id,[]]]), all=new Map(), log=[];
-  const key=f=>JSON.stringify([f.rule,f.file,f.line,f.reference]);
+  const order=plan(graph), inputs=new Map([[order[0].id,[]]]), all=new Map(), log=[],diagnostics=new Map(),coverage=[];
+  const key=f=>JSON.stringify([f.rule,f.file,f.line,f.reference,f.description]);
   for(const n of order){
     let rows=inputs.get(n.id), port='next', detail='';
     if(!rows){log.push({id:n.id,state:'Пропущен'});status(log.at(-1));continue;}
     status({id:n.id,state:'Выполняется'});
     try{
-      if(['secrets','sca','sast'].includes(n.type)) rows=[...rows,...scan(n.type,files,catalog).filter(f=>levels.indexOf(f.severity)>=levels.indexOf(n.level||'info'))];
+      if(['secrets','sca','sast'].includes(n.type)){
+        const analysis=analyze(n.type,files,catalog);
+        rows=[...rows,...analysis.findings.filter(f=>levels.indexOf(f.severity)>=levels.indexOf(n.level||'info'))];
+        coverage.push({id:n.id,...analysis.coverage});
+        for(const d of analysis.diagnostics)diagnostics.set(JSON.stringify(d),d);
+        if(analysis.diagnostics.length)detail='Диагностических сообщений: '+analysis.diagnostics.length;
+      }
       if(n.type==='custom')rows=[...rows,...scanCustom(n.definition,files)];
       if(n.type==='condition'){
         const re=n.pattern?new RegExp(n.pattern,'i'):null;
@@ -55,6 +61,6 @@ async function execute(graph,files,catalog,services,status=()=>{}){
     }catch(err){log.push({id:n.id,state:'Ошибка',detail:err.message});status(log.at(-1));break;}
     status(log.at(-1));
   }
-  return {time:new Date().toISOString(),findings:[...all.values()],log,ok:!log.some(l=>l.state==='Ошибка')};
+  return {time:new Date().toISOString(),findings:[...all.values()],diagnostics:[...diagnostics.values()],coverage,log,ok:!log.some(l=>l.state==='Ошибка')};
 }
 module.exports={execute,plan};

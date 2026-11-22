@@ -95,8 +95,10 @@ function createServer(service, { secureCookie = false, host = '127.0.0.1', port 
       if (method === 'POST' && url.pathname === '/api/telegram/code') return send(200, await service.createCode(session));
       if (method === 'GET' && url.pathname === '/api/reports') return send(200, await service.reports(session));
       if (method === 'POST' && url.pathname === '/api/reports') {
-        const report = await service.saveReport(session, await jsonBody(req));
-        return send(201, { id: report.id, count: report.findings.length, delivery: 'queued_for_active_telegram_sessions' });
+        const input = await jsonBody(req);
+        const includeJson = input?.includeJson === true;
+        const report = await service.saveReport(session, input, { includeJson });
+        return send(201, { id: report.id, count: report.findings.length, delivery: 'queued_for_active_telegram_sessions', formats: includeJson ? ['pdf', 'json'] : ['pdf'] });
       }
       if (method === 'GET' && url.pathname === '/api/deliveries') {
         return send(200, await service.repo.read(s => s.deliveries.filter(j => s.reports.some(r => r.id === j.reportId && r.userId === session.userId)).slice(-100)));

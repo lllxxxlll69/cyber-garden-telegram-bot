@@ -123,6 +123,10 @@ test('HTTP cookies, bearer API, validation, isolation, CSRF and PDF download', a
   const responseReport = await call('/api/reports', post(example, auth));
   assert.equal(responseReport.status, 201);
   const report = await responseReport.json();
+  assert.deepEqual(report.formats, ['pdf']);
+  const both = await call('/api/reports', post({ ...example, includeJson: true }, auth));
+  assert.equal(both.status, 201);
+  assert.deepEqual((await both.json()).formats, ['pdf', 'json']);
   const pdf = await call(`/api/reports/${report.id}/pdf`, { headers: auth });
   assert.equal(pdf.headers.get('content-type'), 'application/pdf');
   const pdfBytes = Buffer.from(await pdf.arrayBuffer());
@@ -135,6 +139,34 @@ test('HTTP cookies, bearer API, validation, isolation, CSRF and PDF download', a
   assert.equal((await call('/api/logout', { method: 'POST', headers: auth })).status, 200);
   assert.equal((await call('/api/me', { headers: auth })).status, 401);
   assert.equal((await service.authenticate(integration.token)).kind, 'api', 'integration session is independent of browser logout');
+});
+test('Telegram JSON is independently retried and can be requested for earlier reports', async t => {
+  const { repo, service, advance } = await setup(t);
+  const a = await account(service);
+  const code = await service.createCode(a.auth);
+  await service.link(code.code, '123');
+  const earlier = await service.saveReport(a.auth, example, { deliver: false });
+  const current = await service.saveReport(a.auth, example, { includeJson: true });
+  const sent = [];
+  let failJson = true;
+  const bot = new TelegramBot('test', service, { render: async () => Buffer.from('%PDF-TEST'), fetchImpl: async (_, options) => {
+    const file = options.body.get('document');
+    sent.push(file);
+    if (file.type === 'application/json' && failJson) throw Error('network');
+    return { ok: true, json: async () => ({ ok: true }) };
+  } });
+  await bot.deliver();
+  assert.deepEqual(await repo.read(s => s.deliveries.map(j => [j.format, j.state])), [['pdf', 'sent'], ['json', 'pending']]);
+  advance(60000);
+  failJson = false;
+  await bot.deliver();
+  assert.deepEqual(sent.map(file => file.name), [`report-${current.id}.pdf`, `report-${current.id}.json`, `report-${current.id}.json`]);
+  await bot.handle({ message: { text: '/json ' + earlier.id, chat: { id: 123, type: 'private' }, from: { id: 123 } } });
+  const attachment = sent.at(-1);
+  assert.equal(attachment.name, `report-${earlier.id}.json`);
+  assert.equal(attachment.type, 'application/json');
+  const { id, title, created, findings } = earlier;
+  assert.deepEqual(JSON.parse(await attachment.text()), { id, title, created, findings });
 });
 test('PDF supports empty and long multipage Cyrillic reports', async () => {
   for (const findings of [[], Array.from({ length: 80 }, () => ({ ...example.findings[0], title: 'Проверка кириллицы: небезопасная конфигурация', fix: 'Рекомендация. '.repeat(100) }))]) {

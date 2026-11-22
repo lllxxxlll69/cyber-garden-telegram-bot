@@ -117,13 +117,15 @@ class ReportService {
     });
     return { title: text(input.title, 200) || 'Отчёт проверки безопасности', findings };
   }
-  async saveReport(session, input, { deliver = true } = {}) {
+  async saveReport(session, input, { deliver = true, includeJson = false } = {}) {
     const data = this.validateReport(input), now = this.now();
     return this.repo.transaction(s => {
       const report = { ...data, id: randomUUID(), userId: session.userId, created: now };
       s.reports.push(report);
       for (const x of s.sessions.filter(x => deliver && x.userId === session.userId && x.kind === 'telegram' && active(x, now))) {
-        s.deliveries.push({ id: randomUUID(), reportId: report.id, sessionId: x.id, state: 'pending', attempts: 0, next: now });
+        const job = { reportId: report.id, sessionId: x.id, state: 'pending', attempts: 0, next: now };
+        s.deliveries.push({ ...job, id: randomUUID(), format: 'pdf' });
+        if (includeJson) s.deliveries.push({ ...job, id: randomUUID(), format: 'json' });
       }
       return report;
     });

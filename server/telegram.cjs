@@ -23,12 +23,14 @@ class TelegramBot {
     return data.result;
   }
   text(chatId, text) { return this.call('sendMessage', { chat_id: chatId, text }); }
-  async document(chatId, report) {
-    const pdf = await this.render(report);
+  async document(chatId, report, format = 'pdf') {
+    const isJson = format === 'json';
+    const { id, title, created, findings } = report;
+    const contents = isJson ? JSON.stringify({ id, title, created, findings }, null, 2) + '\n' : await this.render(report);
     const form = new FormData();
     form.set('chat_id', String(chatId));
     form.set('caption', `Cyber Garden: ${report.findings.length} находок`);
-    form.set('document', new Blob([pdf], { type: 'application/pdf' }), `report-${report.id}.pdf`);
+    form.set('document', new Blob([contents], { type: isJson ? 'application/json' : 'application/pdf' }), `report-${id}.${isJson ? 'json' : 'pdf'}`);
     return this.call('sendDocument', form);
   }
   async handle(update) {
@@ -39,12 +41,12 @@ class TelegramBot {
     const cmd = command?.split('@')[0];
     try {
       if (cmd === '/start' || cmd === '/help') {
-        await this.text(chatId, 'Cyber Garden\n/login КОД - вход по одноразовому коду с локального сервера\n/reports - последние отчёты\n/report ID - скачать PDF (без ID - последний)\n/sessions - активные сессии\n/logout - завершить вход\nПароль в чат отправлять не нужно.');
+        await this.text(chatId, 'Cyber Garden\n/login КОД - вход по одноразовому коду с локального сервера\n/reports - последние отчёты\n/report ID - скачать PDF\n/json ID - скачать JSON\nБез ID выдаётся последний отчёт.\n/sessions - активные сессии\n/logout - завершить вход\nПароль в чат отправлять не нужно.');
         return;
       }
       if (cmd === '/login') {
         await this.service.link(argument, chatId);
-        await this.text(chatId, 'Вход выполнен. Новые отчёты будут приходить в PDF. /report - последний отчёт.');
+        await this.text(chatId, 'Вход выполнен. Последний отчёт: /report для PDF или /json для JSON.');
         return;
       }
       const session = await this.service.telegramSession(chatId);
@@ -57,10 +59,10 @@ class TelegramBot {
       } else if (cmd === '/reports') {
         const reports = (await this.service.reports(session)).slice(0, 10);
         await this.text(chatId, reports.length ? reports.map(r => `${r.id}\n${r.title} (${r.count})`).join('\n\n') : 'Отчётов пока нет.');
-      } else if (cmd === '/report') {
+      } else if (cmd === '/report' || cmd === '/json') {
         const id = argument || (await this.service.reports(session))[0]?.id;
         const report = await this.service.report(session, id);
-        await this.document(chatId, report);
+        await this.document(chatId, report, cmd === '/json' ? 'json' : 'pdf');
       } else await this.text(chatId, 'Список команд: /help');
     } catch (error) {
       if (error instanceof AppError) await this.text(chatId, error.message);
@@ -81,7 +83,7 @@ class TelegramBot {
         });
         let state = 'cancelled';
         if (target) {
-          try { await this.document(target.session.chatId, target.report); state = 'sent'; }
+          try { await this.document(target.session.chatId, target.report, job.format); state = 'sent'; }
           catch { state = job.attempts >= 7 ? 'failed' : 'pending'; }
         }
         await this.service.repo.transaction(s => {

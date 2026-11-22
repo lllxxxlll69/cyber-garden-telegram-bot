@@ -48,8 +48,28 @@ test('templates contain a graph only and AI generation requires a configured mod
  const {workspace,session}=await setup(t),project=await workspace.addProject(session,{demo:true});
  const workflow=await workspace.saveWorkflow(session,{name:'Шаблон',projectId:project.id,graph:defaultGraph()});
  await workspace.publish(session,{workflowId:workflow.id,description:'Базовый сценарий'});
- const templates=await workspace.templates();assert.equal(templates.length,2);assert.equal(templates[1].projectId,undefined);assert.equal(templates[1].userId,undefined);
+ const templates=await workspace.templates();assert.equal(templates.length,4);
+ const comprehensive=templates.find(x=>x.id==='builtin-comprehensive');
+ assert.deepEqual(comprehensive.graph.nodes.map(x=>x.type),['manual','secrets','sca','sast','ai']);
+ assert.equal(templates.at(-1).projectId,undefined);assert.equal(templates.at(-1).userId,undefined);
  await assert.rejects(workspace.generate('Проверь секреты'),{status:400});
+});
+test('full scan template retains all built-in checks when saved and run',async t=>{
+ const {repo,workspace,session}=await setup(t);
+ const {demoFiles}=require('../garden/scanners.cjs');
+ const files={...demoFiles,'application.properties':'debug=true','build.gradle.kts':'dependencies { implementation("org.apache.commons:commons-text:1.9") }'};
+ const project=await workspace.addProject(session,{name:'Проверка шаблона',confirmedTraining:true,files});
+ const template=(await workspace.templates()).find(item=>item.id==='builtin-full-scan');
+ const workflow=await workspace.saveWorkflow(session,{name:template.name,projectId:project.id,graph:template.graph});
+ assert.deepEqual(workflow.graph,template.graph);
+ const run=await workspace.start(session,workflow.id);await workspace.close();
+ const done=await workspace.owned(session,'runs',run.id);
+ assert.equal(done.state,'done');
+ assert.deepEqual(done.coverage.map(entry=>entry.kind),['secrets','sca','sast']);
+ assert.equal(done.log.filter(entry=>entry.state==='Готово').length,9);
+ assert.ok(done.findings.some(f=>f.rule.startsWith('custom-')&&f.file==='application.properties'));
+ assert.ok(done.findings.some(f=>f.category==='SCA'&&f.reference==='CVE-2022-42889'));
+ assert.equal(await repo.read(s=>s.deliveries.length),0);
 });
 test('daily schedule starts once per minute and interrupted runs recover explicitly',async t=>{
  const {workspace,session,repo}=await setup(t),project=await workspace.addProject(session,{demo:true});
